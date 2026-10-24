@@ -44,6 +44,14 @@ app = FastAPI(
     version="1.0.0"
 )
 
+@app.get("/api/version")
+def get_version():
+    return {
+        "version": "1.0.1",
+        "commit": "ccb688a-tile-block",
+        "status": "healthy"
+    }
+
 # Enable CORS for frontend development
 app.add_middleware(
     CORSMiddleware,
