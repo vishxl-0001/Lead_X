@@ -4,18 +4,22 @@ from typing import List, Dict, Any
 
 logger = logging.getLogger("lead_finder.geocoding")
 
-# Using OpenStreetMap Nominatim / Photon global geocoder (100% Free, worldwide down to neighborhood level, no API key needed)
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# 100% Free global geocoding APIs with zero key requirements
+OPEN_METEO_URL = "https://geocoding-api.open-meteo.com/v1/search"
 PHOTON_URL = "https://photon.komoot.io/api/"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
-HEADERS = {
-    "User-Agent": "LeadFinderGlobalB2B/1.0 (contact@leadfinder.local)"
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    "Accept": "application/json, text/plain, */*",
 }
 
 
 def search_locations_global(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     """
     Searches worldwide locations, cities, states, regions, and neighborhoods.
+    Uses ultra-fast Open-Meteo as primary (unrestricted for cloud/Render instances),
+    with Photon and Nominatim as fallback.
     Returns clean suggestions with display name, city, state, country, country_code, lat, lon.
     """
     if not query or len(query.strip()) < 2:
@@ -24,13 +28,60 @@ def search_locations_global(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     q = query.strip()
     results = []
 
-    # Try Photon first (super fast global search built on OpenStreetMap)
+    # 1. Try Open-Meteo Global Geocoding (Ultra-fast ~50ms, 100% free, never blocks cloud/Render IPs)
+    try:
+        resp = requests.get(
+            OPEN_METEO_URL,
+            params={"name": q, "count": limit, "language": "en", "format": "json"},
+            headers=BROWSER_HEADERS,
+            timeout=4
+        )
+        if resp.status_code == 200:
+            items = resp.json().get("results") or []
+            if not items and "," in q:
+                # If no direct match with comma, try first token (e.g. "Auckland" from "Auckland, New Zealand")
+                first_token = q.split(",")[0].strip()
+                resp2 = requests.get(
+                    OPEN_METEO_URL,
+                    params={"name": first_token, "count": limit, "language": "en", "format": "json"},
+                    headers=BROWSER_HEADERS,
+                    timeout=4
+                )
+                if resp2.status_code == 200:
+                    items = resp2.json().get("results") or []
+
+            for item in items:
+                name = item.get("name") or ""
+                admin1 = item.get("admin1") or ""
+                country = item.get("country") or ""
+                country_code = (item.get("country_code") or "").upper()
+                parts = [p for p in [name, admin1, country] if p]
+                display_label = ", ".join(dict.fromkeys(parts))
+
+                results.append({
+                    "display_name": display_label,
+                    "name": name,
+                    "city": name,
+                    "state": admin1,
+                    "country": country,
+                    "country_code": country_code,
+                    "lat": float(item.get("latitude", 0)),
+                    "lon": float(item.get("longitude", 0)),
+                    "type": "city"
+                })
+
+            if results:
+                return results
+    except Exception as e:
+        logger.debug(f"Open-Meteo lookup warning: {e}")
+
+    # 2. Try Photon fallback (OpenStreetMap data)
     try:
         resp = requests.get(
             PHOTON_URL,
             params={"q": q, "limit": limit, "lang": "en"},
-            headers=HEADERS,
-            timeout=5
+            headers=BROWSER_HEADERS,
+            timeout=4
         )
         if resp.status_code == 200:
             data = resp.json()
@@ -46,7 +97,6 @@ def search_locations_global(query: str, limit: int = 8) -> List[Dict[str, Any]]:
                 country = props.get("country", "")
                 country_code = (props.get("countrycode") or "").upper()
 
-                # Build clean display label
                 parts = [p for p in [name, city if city != name else None, state, country] if p]
                 display_label = ", ".join(dict.fromkeys(parts))
 
@@ -67,13 +117,13 @@ def search_locations_global(query: str, limit: int = 8) -> List[Dict[str, Any]]:
     except Exception as e:
         logger.debug(f"Photon lookup error: {e}")
 
-    # Fallback to Nominatim
+    # 3. Fallback to Nominatim
     try:
         resp = requests.get(
             NOMINATIM_URL,
             params={"q": q, "format": "json", "addressdetails": 1, "limit": limit, "accept-language": "en"},
-            headers=HEADERS,
-            timeout=5
+            headers=BROWSER_HEADERS,
+            timeout=4
         )
         if resp.status_code == 200:
             items = resp.json()

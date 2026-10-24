@@ -121,16 +121,67 @@ export const api = {
 
   async searchLocations(q: string): Promise<LocationSuggestion[]> {
     if (!q || q.trim().length < 2) return [];
+
+    // 1. Primary: Try Backend location service
     try {
       const res = await fetch(`${getApiBase()}/locations/search?q=${encodeURIComponent(q)}`, {
         headers: getAuthHeaders(),
       });
-      if (!res.ok) return [];
-      const data = await res.json();
-      return data.results || [];
-    } catch {
-      return [];
+      if (res.ok) {
+        const data = await res.json();
+        if (data.results && data.results.length > 0) {
+          return data.results;
+        }
+      }
+    } catch (e) {
+      console.warn('Backend location lookup error, falling back to direct geocoding:', e);
     }
+
+    // 2. Client-side Fallback: Query Open-Meteo global API directly from browser
+    try {
+      const cleanQ = q.trim();
+      const directRes = await fetch(
+        `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(cleanQ)}&count=8&language=en&format=json`
+      );
+      if (directRes.ok) {
+        const data = await directRes.json();
+        let items = data.results || [];
+
+        // If no results and query has a comma (e.g. "Auckland, New Zealand"), try the first token
+        if (items.length === 0 && cleanQ.includes(',')) {
+          const firstToken = cleanQ.split(',')[0].trim();
+          const tokenRes = await fetch(
+            `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(firstToken)}&count=8&language=en&format=json`
+          );
+          if (tokenRes.ok) {
+            const tokenData = await tokenRes.json();
+            items = tokenData.results || [];
+          }
+        }
+
+        if (items.length > 0) {
+          return items.map((item: any) => {
+            const parts = [item.name, item.admin1, item.country].filter(Boolean);
+            const displayName = Array.from(new Set(parts)).join(', ');
+            return {
+              display_name: displayName,
+              name: item.name,
+              city: item.name,
+              state: item.admin1 || '',
+              country: item.country || '',
+              country_code: (item.country_code || '').toUpperCase(),
+              lat: item.latitude,
+              lon: item.longitude,
+              type: 'city',
+            };
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Direct geocoding error:', err);
+    }
+
+    return [];
   },
 
   async getSubAreas(region: string): Promise<string[]> {

@@ -62,13 +62,20 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
   const [subAreas, setSubAreas] = useState<string[]>([]);
   const [showSuggestions, setShowSuggestions] = useState<boolean>(false);
   const [isSearchingLocation, setIsSearchingLocation] = useState<boolean>(false);
+  const [selectedCountryCode, setSelectedCountryCode] = useState<string>('NZ');
 
   const locationDebounceTimer = useRef<number | null>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const isProgrammaticChange = useRef<boolean>(false);
 
   // Live Location Search as user types
   useEffect(() => {
     if (locationDebounceTimer.current) clearTimeout(locationDebounceTimer.current);
+
+    if (isProgrammaticChange.current) {
+      isProgrammaticChange.current = false;
+      return;
+    }
 
     if (locationInput.trim().length >= 2) {
       setIsSearchingLocation(true);
@@ -86,7 +93,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
         } finally {
           setIsSearchingLocation(false);
         }
-      }, 300);
+      }, 250);
     } else {
       setSuggestions([]);
       setSubAreas([]);
@@ -110,8 +117,12 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
   }, []);
 
   const handleSelectLocation = async (s: LocationSuggestion) => {
+    isProgrammaticChange.current = true;
     setLocationInput(s.display_name || s.name);
     setSelectedCoords({ lat: s.lat, lon: s.lon });
+    if (s.country_code) {
+      setSelectedCountryCode(s.country_code);
+    }
     setShowSuggestions(false);
 
     // Fetch specific sub-areas for this region (e.g. Toronto, Ottawa in Ontario)
@@ -120,12 +131,16 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
   };
 
   const handleSelectSubArea = async (subArea: string) => {
+    isProgrammaticChange.current = true;
     setLocationInput(subArea);
     setSubAreas([]);
     try {
       const geo = await api.searchLocations(subArea);
       if (geo && geo.length > 0) {
         setSelectedCoords({ lat: geo[0].lat, lon: geo[0].lon });
+        if (geo[0].country_code) {
+          setSelectedCountryCode(geo[0].country_code);
+        }
       }
     } catch {
       // Coordinates will be auto-resolved by backend
@@ -138,6 +153,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
 
     let lat = selectedCoords.lat;
     let lon = selectedCoords.lon;
+    let countryCode = selectedCountryCode;
 
     if (!lat || !lon) {
       try {
@@ -146,6 +162,10 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
           lat = geo[0].lat;
           lon = geo[0].lon;
           setSelectedCoords({ lat, lon });
+          if (geo[0].country_code) {
+            countryCode = geo[0].country_code;
+            setSelectedCountryCode(countryCode);
+          }
         }
       } catch {
         // Coordinates will be auto-resolved by backend
@@ -159,6 +179,7 @@ export const SearchPanel: React.FC<SearchPanelProps> = ({
       radius_km: radiusKm,
       lat: lat,
       lon: lon,
+      country_code: countryCode,
       no_website_only: noWebsiteOnly,
       mobile_only: mobileOnly,
       min_rating: minRating,

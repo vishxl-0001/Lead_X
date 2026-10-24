@@ -376,19 +376,33 @@ class GoogleMapsScraper:
                             raw_addr = None
                             for line in lines:
                                 if "·" in line and not any(kw in line.lower() for kw in ["open", "closed", "opens", "closes", "hour"]):
-                                    parts = line.split("·")
+                                    cleaned_line = re.sub(r'[\ue000-\uf8ff]', '', line)
+                                    parts = [p.strip() for p in cleaned_line.split("·") if p.strip()]
                                     if len(parts) >= 2:
-                                        raw_addr = parts[1].strip()
-                                        break
-                            if not raw_addr:
-                                for line in lines:
-                                    if any(term in line for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place", "Lane", "Hwy", "Highway"]):
-                                        raw_addr = line.split("·")[-1].strip() if "·" in line else line.strip()
+                                        raw_addr = parts[-1]
                                         break
 
-                            address = re.sub(r'[\ue000-\uf8ff]', '', raw_addr or '').strip() if raw_addr else self.location
-                            address = re.sub(r'^Address:\s*', '', address, flags=re.IGNORECASE).strip()
-                            address = " ".join(line.strip() for line in address.splitlines() if line.strip())
+                            if not raw_addr:
+                                for line in lines:
+                                    cleaned_line = re.sub(r'[\ue000-\uf8ff]', '', line).strip()
+                                    if any(term in cleaned_line for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place", "Lane", "Hwy", "Highway", "Floor", "Level"]):
+                                        parts = [p.strip() for p in cleaned_line.split("·") if p.strip()]
+                                        raw_addr = parts[-1] if parts else cleaned_line
+                                        break
+
+                            # Clean and format address with city
+                            clean_street = re.sub(r'[\ue000-\uf8ff]', '', raw_addr or '').strip() if raw_addr else ""
+                            clean_street = re.sub(r'^Address:\s*', '', clean_street, flags=re.IGNORECASE).strip()
+                            clean_street = " ".join(l.strip() for l in clean_street.splitlines() if l.strip())
+
+                            if clean_street and clean_street.lower() != self.location.lower():
+                                primary_city = self.location.split(",")[0].strip()
+                                if primary_city.lower() not in clean_street.lower():
+                                    address = f"{clean_street}, {self.location}"
+                                else:
+                                    address = clean_street
+                            else:
+                                address = self.location
 
                             # Filter by rating if set
                             if self.min_rating > 0 and (rating or 0.0) < self.min_rating:
