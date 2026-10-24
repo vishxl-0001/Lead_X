@@ -170,6 +170,8 @@ class GoogleMapsScraper:
                     "--disable-blink-features=AutomationControlled",
                     "--no-sandbox",
                     "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
                     "--disable-infobars",
                     "--window-size=1366,768",
                 ],
