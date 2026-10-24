@@ -1,10 +1,15 @@
 import { LeadItem, ScrapeRequest, JobStatus, StatsResponse, LocationSuggestion, HistoryJob, AuthUser } from '../types';
 
-const RAW_URL = ((import.meta as any).env?.VITE_API_URL || '').trim().replace(/\/+$/, '');
-const API_BASE = RAW_URL ? (RAW_URL.endsWith('/api') ? RAW_URL : `${RAW_URL}/api`) : '/api';
-
 const TOKEN_KEY = 'lead_x_auth_token';
 const USERNAME_KEY = 'lead_x_auth_user';
+const BACKEND_URL_KEY = 'lead_x_custom_backend_url';
+
+export function getApiBase(): string {
+  const custom = typeof window !== 'undefined' ? localStorage.getItem(BACKEND_URL_KEY) : null;
+  const envUrl = ((import.meta as any).env?.VITE_API_URL || '').trim();
+  const raw = (custom || envUrl).replace(/\/+$/, '');
+  return raw ? (raw.endsWith('/api') ? raw : `${raw}/api`) : '/api';
+}
 
 function getAuthHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
   const token = localStorage.getItem(TOKEN_KEY);
@@ -16,6 +21,19 @@ function getAuthHeaders(customHeaders: Record<string, string> = {}): Record<stri
 }
 
 export const api = {
+  getBackendUrl(): string {
+    return localStorage.getItem(BACKEND_URL_KEY) || ((import.meta as any).env?.VITE_API_URL || '');
+  },
+
+  setBackendUrl(url: string): void {
+    const trimmed = url.trim().replace(/\/+$/, '');
+    if (trimmed) {
+      localStorage.setItem(BACKEND_URL_KEY, trimmed);
+    } else {
+      localStorage.removeItem(BACKEND_URL_KEY);
+    }
+  },
+
   getToken(): string | null {
     return localStorage.getItem(TOKEN_KEY);
   },
@@ -30,26 +48,43 @@ export const api = {
   },
 
   async login(username: string, password: string): Promise<AuthUser> {
-    const res = await fetch(`${API_BASE}/auth/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username, password }),
-    });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      throw new Error(err.detail || 'Invalid username or password');
+    const apiBase = getApiBase();
+    try {
+      const res = await fetch(`${apiBase}/auth/login`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username, password }),
+      });
+
+      if (!res.ok) {
+        if (res.status === 404) {
+          throw new Error(
+            'Backend returned 404 Not Found. Make sure your Render backend has finished building and the backend URL is connected.'
+          );
+        }
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Invalid username or password');
+      }
+
+      const data: AuthUser = await res.json();
+      localStorage.setItem(TOKEN_KEY, data.token);
+      localStorage.setItem(USERNAME_KEY, data.username);
+      return data;
+    } catch (fetchErr: any) {
+      if (fetchErr.name === 'TypeError' || fetchErr.message?.includes('Failed to fetch')) {
+        throw new Error(
+          'Cannot reach backend server. Please verify your Render service is Live and enter the backend URL below.'
+        );
+      }
+      throw fetchErr;
     }
-    const data: AuthUser = await res.json();
-    localStorage.setItem(TOKEN_KEY, data.token);
-    localStorage.setItem(USERNAME_KEY, data.username);
-    return data;
   },
 
   async checkAuth(): Promise<{ authenticated: boolean; username: string }> {
     const token = localStorage.getItem(TOKEN_KEY);
     if (!token) return { authenticated: false, username: '' };
     try {
-      const res = await fetch(`${API_BASE}/auth/me`, {
+      const res = await fetch(`${getApiBase()}/auth/me`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) {
@@ -65,7 +100,7 @@ export const api = {
 
   async getJobs(): Promise<HistoryJob[]> {
     try {
-      const res = await fetch(`${API_BASE}/jobs`, {
+      const res = await fetch(`${getApiBase()}/jobs`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) return [];
@@ -77,7 +112,7 @@ export const api = {
   },
 
   async deleteJob(jobId: number): Promise<void> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+    const res = await fetch(`${getApiBase()}/jobs/${jobId}`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
     });
@@ -87,7 +122,7 @@ export const api = {
   async searchLocations(q: string): Promise<LocationSuggestion[]> {
     if (!q || q.trim().length < 2) return [];
     try {
-      const res = await fetch(`${API_BASE}/locations/search?q=${encodeURIComponent(q)}`, {
+      const res = await fetch(`${getApiBase()}/locations/search?q=${encodeURIComponent(q)}`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) return [];
@@ -101,7 +136,7 @@ export const api = {
   async getSubAreas(region: string): Promise<string[]> {
     if (!region) return [];
     try {
-      const res = await fetch(`${API_BASE}/locations/sub-areas?region=${encodeURIComponent(region)}`, {
+      const res = await fetch(`${getApiBase()}/locations/sub-areas?region=${encodeURIComponent(region)}`, {
         headers: getAuthHeaders(),
       });
       if (!res.ok) return [];
@@ -113,7 +148,7 @@ export const api = {
   },
 
   async startScrape(payload: ScrapeRequest): Promise<{ status: string; job_id: number; message: string }> {
-    const res = await fetch(`${API_BASE}/scrape`, {
+    const res = await fetch(`${getApiBase()}/scrape`, {
       method: 'POST',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
@@ -123,7 +158,7 @@ export const api = {
   },
 
   async getJobStatus(jobId: number): Promise<JobStatus> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+    const res = await fetch(`${getApiBase()}/jobs/${jobId}`, {
       headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Failed to get job status');
@@ -131,7 +166,7 @@ export const api = {
   },
 
   async stopJob(jobId: number): Promise<void> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}/stop`, {
+    const res = await fetch(`${getApiBase()}/jobs/${jobId}/stop`, {
       method: 'POST',
       headers: getAuthHeaders(),
     });
@@ -156,7 +191,7 @@ export const api = {
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.offset) query.set('offset', String(params.offset));
 
-    const res = await fetch(`${API_BASE}/leads?${query.toString()}`, {
+    const res = await fetch(`${getApiBase()}/leads?${query.toString()}`, {
       headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Failed to fetch leads');
@@ -164,7 +199,7 @@ export const api = {
   },
 
   async updateLead(leadId: number, update: { status?: string; notes?: string; owner_name?: string }): Promise<void> {
-    const res = await fetch(`${API_BASE}/leads/${leadId}`, {
+    const res = await fetch(`${getApiBase()}/leads/${leadId}`, {
       method: 'PATCH',
       headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(update),
@@ -173,7 +208,7 @@ export const api = {
   },
 
   async deleteLead(leadId: number): Promise<void> {
-    const res = await fetch(`${API_BASE}/leads/${leadId}`, {
+    const res = await fetch(`${getApiBase()}/leads/${leadId}`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
     });
@@ -181,7 +216,7 @@ export const api = {
   },
 
   async clearAllLeads(): Promise<void> {
-    const res = await fetch(`${API_BASE}/leads`, {
+    const res = await fetch(`${getApiBase()}/leads`, {
       method: 'DELETE',
       headers: getAuthHeaders(),
     });
@@ -189,7 +224,7 @@ export const api = {
   },
 
   async getStats(): Promise<StatsResponse> {
-    const res = await fetch(`${API_BASE}/stats`, {
+    const res = await fetch(`${getApiBase()}/stats`, {
       headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Failed to fetch statistics');
@@ -197,7 +232,7 @@ export const api = {
   },
 
   async getDefaultTemplate(): Promise<string> {
-    const res = await fetch(`${API_BASE}/template`, {
+    const res = await fetch(`${getApiBase()}/template`, {
       headers: getAuthHeaders(),
     });
     if (!res.ok) return '';
@@ -214,7 +249,7 @@ export const api = {
     if (params?.job_id !== undefined) query.set('job_id', String(params.job_id));
     const token = this.getToken();
     if (token) query.set('token', token);
-    return `${API_BASE}/export/csv?${query.toString()}`;
+    return `${getApiBase()}/export/csv?${query.toString()}`;
   },
 
   getExportVcfUrl(params?: { no_website_only?: boolean; mobile_only?: boolean; status?: string; search?: string; job_id?: number }): string {
@@ -226,6 +261,6 @@ export const api = {
     if (params?.job_id !== undefined) query.set('job_id', String(params.job_id));
     const token = this.getToken();
     if (token) query.set('token', token);
-    return `${API_BASE}/export/vcf?${query.toString()}`;
+    return `${getApiBase()}/export/vcf?${query.toString()}`;
   },
 };
