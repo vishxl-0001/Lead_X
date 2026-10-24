@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import json
 import logging
 import random
@@ -173,22 +174,29 @@ class GoogleMapsScraper:
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
                     "--disable-software-rasterizer",
+                    "--disable-webgl",
+                    "--disable-webgl2",
+                    "--disable-3d-apis",
+                    "--disable-accelerated-2d-canvas",
+                    "--disable-gl-drawing-for-tests",
                     "--blink-settings=imagesEnabled=false",
                     "--single-process",
                     "--no-zygote",
                     "--renderer-process-limit=1",
-                    "--js-flags=--max-old-space-size=64",
+                    "--js-flags=--max-old-space-size=32",
+                    "--disk-cache-size=1",
+                    "--media-cache-size=1",
                     "--disable-extensions",
                     "--disable-default-apps",
                     "--disable-sync",
                     "--no-first-run",
                     "--mute-audio",
-                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process,Translate,BackForwardCache",
-                    "--window-size=1024,600",
+                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process,Translate,BackForwardCache,CalculateNativeWinOcclusion",
+                    "--window-size=800,600",
                 ],
             )
             context: BrowserContext = await browser.new_context(
-                viewport={"width": 1024, "height": 600},
+                viewport={"width": 800, "height": 600},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 locale="en-US",
             )
@@ -199,10 +207,17 @@ class GoogleMapsScraper:
             ])
             page: Page = await context.new_page()
 
-            # Abort heavy photo carousels, media, and fonts to prevent OOM memory spikes on cloud containers
+            # Abort heavy photo carousels, media, fonts, stylesheets, and vector map tiles
+            # to keep Chromium well below Render's 512MB RAM ceiling
             await page.route(
                 "**/*",
-                lambda r: r.abort() if r.request.resource_type in ["image", "media", "font"] else r.continue_()
+                lambda r: r.abort() if (
+                    r.request.resource_type in ["image", "media", "font", "stylesheet"]
+                    or any(k in r.request.url for k in [
+                        "/maps/vt", "/maps/preview", "geometry", "vector",
+                        "google-analytics", "play.google.com/log", "stats"
+                    ])
+                ) else r.continue_()
             )
 
             try:
@@ -505,7 +520,14 @@ class GoogleMapsScraper:
                     self.progress_callback(self.total_scanned, self.no_website_count, self.mobile_count, f"Error: {e}")
                 raise e
             finally:
-                await context.close()
-                await browser.close()
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
+                gc.collect()
 
         return self.leads_collected

@@ -7,7 +7,13 @@ const BACKEND_URL_KEY = 'lead_x_custom_backend_url';
 export function getApiBase(): string {
   const custom = typeof window !== 'undefined' ? localStorage.getItem(BACKEND_URL_KEY) : null;
   const envUrl = ((import.meta as any).env?.VITE_API_URL || '').trim();
-  const raw = (custom || envUrl).replace(/\/+$/, '');
+  let raw = (custom || envUrl).replace(/\/+$/, '');
+  if (!raw && typeof window !== 'undefined') {
+    const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
+    if (!isLocal) {
+      raw = 'https://lead-x.onrender.com';
+    }
+  }
   return raw ? (raw.endsWith('/api') ? raw : `${raw}/api`) : '/api';
 }
 
