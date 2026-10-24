@@ -15,7 +15,7 @@ import { RotateCcw, Loader2 } from 'lucide-react';
 export const App: React.FC = () => {
   // Authentication state
   const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
-  const [currentUser, setCurrentUser] = useState<string>('vishxl');
+  const [currentUser, setCurrentUser] = useState<string>('');
   const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
 
   // Navigation: 'live' (current extraction) vs 'history' (past search archives)
