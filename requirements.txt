@@ -1,0 +1,9 @@
+fastapi>=0.110.0
+uvicorn>=0.28.0
+pydantic>=2.6.0
+playwright>=1.42.0
+playwright-stealth>=1.0.6
+phonenumbers>=8.13.32
+beautifulsoup4>=4.12.3
+requests>=2.31.0
+aiofiles>=23.2.1
