@@ -1,6 +1,7 @@
 import { LeadItem, ScrapeRequest, JobStatus, StatsResponse, LocationSuggestion, HistoryJob } from '../types';
 
-const API_BASE = '/api';
+const RAW_URL = (import.meta.env.VITE_API_URL || '').trim().replace(/\/+$/, '');
+const API_BASE = RAW_URL ? (RAW_URL.endsWith('/api') ? RAW_URL : `${RAW_URL}/api`) : '/api';
 
 export const api = {
   async getJobs(): Promise<HistoryJob[]> {
