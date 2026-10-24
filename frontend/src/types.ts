@@ -1,3 +1,9 @@
+export interface AuthUser {
+  username: string;
+  token: string;
+  expires_in?: number;
+}
+
 export interface LeadItem {
   id?: number;
   place_id?: string;

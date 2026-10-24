@@ -1,11 +1,12 @@
 import asyncio
 import logging
 from typing import Any, Dict, List, Optional
-from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Response
+from fastapi import FastAPI, BackgroundTasks, HTTPException, Query, Response, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse
 
 from backend.config import DEFAULT_TEMPLATE
+from backend.auth import authenticate_user, create_token, get_current_user
 from backend.database import (
     init_db,
     save_or_update_lead,
@@ -20,7 +21,15 @@ from backend.database import (
     get_all_jobs,
     delete_job
 )
-from backend.models import ScrapeRequest, LeadItem, LeadUpdate, JobStatus, StatsResponse
+from backend.models import (
+    LoginRequest,
+    AuthResponse,
+    ScrapeRequest,
+    LeadItem,
+    LeadUpdate,
+    JobStatus,
+    StatsResponse
+)
 from backend.scraper import GoogleMapsScraper
 from backend.export_utils import export_leads_to_csv, export_leads_to_vcf
 from backend.country_detector import GLOBAL_COUNTRIES, detect_country_from_location
@@ -105,8 +114,34 @@ async def run_scraper_task(job_id: int, req: ScrapeRequest):
         active_scrapers.pop(job_id, None)
 
 
+@app.post("/api/auth/login", response_model=AuthResponse)
+def login(req: LoginRequest):
+    """Authenticates admin user and returns a signed 7-day bearer token."""
+    if not authenticate_user(req.username, req.password):
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid username or password"
+        )
+    token = create_token(req.username)
+    return AuthResponse(
+        token=token,
+        username=req.username,
+        expires_in=7 * 86400
+    )
+
+
+@app.get("/api/auth/me")
+def check_auth(current_user: str = Depends(get_current_user)):
+    """Verifies that the current bearer token is active and valid."""
+    return {"authenticated": True, "username": current_user}
+
+
 @app.post("/api/scrape", response_model=Dict[str, Any])
-async def start_scrape_job(req: ScrapeRequest, background_tasks: BackgroundTasks):
+async def start_scrape_job(
+    req: ScrapeRequest,
+    background_tasks: BackgroundTasks,
+    current_user: str = Depends(get_current_user)
+):
     job_id = create_job(req.query, req.location, req.max_leads)
     background_tasks.add_task(run_scraper_task, job_id, req)
     return {
@@ -117,13 +152,13 @@ async def start_scrape_job(req: ScrapeRequest, background_tasks: BackgroundTasks
 
 
 @app.get("/api/jobs")
-def list_jobs():
+def list_jobs(current_user: str = Depends(get_current_user)):
     """Lists all search history jobs with aggregated leads count."""
     return {"jobs": get_all_jobs()}
 
 
 @app.get("/api/jobs/{job_id}", response_model=JobStatus)
-def check_job_status(job_id: int):
+def check_job_status(job_id: int, current_user: str = Depends(get_current_user)):
     job = get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -131,7 +166,7 @@ def check_job_status(job_id: int):
 
 
 @app.delete("/api/jobs/{job_id}")
-def remove_job(job_id: int):
+def remove_job(job_id: int, current_user: str = Depends(get_current_user)):
     """Deletes a past search run and its associated leads."""
     delete_job(job_id)
     return {"status": "deleted", "job_id": job_id}
@@ -139,7 +174,7 @@ def remove_job(job_id: int):
 
 
 @app.post("/api/jobs/{job_id}/stop")
-def stop_job(job_id: int):
+def stop_job(job_id: int, current_user: str = Depends(get_current_user)):
     if job_id in active_scrapers:
         active_scrapers[job_id].stop()
         update_job_progress(job_id, 0, 0, 0, status="stopped", error_msg="Stopped by user")
@@ -155,7 +190,8 @@ def list_leads(
     status: Optional[str] = None,
     job_id: Optional[int] = None,
     limit: int = Query(default=100, le=1000),
-    offset: int = 0
+    offset: int = 0,
+    current_user: str = Depends(get_current_user)
 ):
     return query_leads(
         search=search,
@@ -169,7 +205,7 @@ def list_leads(
 
 
 @app.patch("/api/leads/{lead_id}")
-def edit_lead(lead_id: int, update: LeadUpdate):
+def edit_lead(lead_id: int, update: LeadUpdate, current_user: str = Depends(get_current_user)):
     success = update_lead(
         lead_id=lead_id,
         status=update.status,
@@ -182,13 +218,13 @@ def edit_lead(lead_id: int, update: LeadUpdate):
 
 
 @app.delete("/api/leads")
-def clear_all():
+def clear_all(current_user: str = Depends(get_current_user)):
     count = clear_all_leads()
     return {"status": "cleared", "deleted_count": count}
 
 
 @app.delete("/api/leads/{lead_id}")
-def remove_lead(lead_id: int):
+def remove_lead(lead_id: int, current_user: str = Depends(get_current_user)):
     success = delete_lead(lead_id)
     if not success:
         raise HTTPException(status_code=404, detail="Lead not found")
@@ -219,7 +255,7 @@ def get_countries():
 
 
 @app.get("/api/stats", response_model=StatsResponse)
-def get_dashboard_stats():
+def get_dashboard_stats(current_user: str = Depends(get_current_user)):
     stats = get_stats()
     return StatsResponse(**stats)
 
@@ -230,7 +266,8 @@ def download_csv(
     no_website_only: bool = False,
     mobile_only: bool = False,
     status: Optional[str] = None,
-    job_id: Optional[int] = None
+    job_id: Optional[int] = None,
+    current_user: str = Depends(get_current_user)
 ):
     leads = query_leads(
         search=search,
@@ -254,7 +291,8 @@ def download_vcf(
     no_website_only: bool = False,
     mobile_only: bool = False,
     status: Optional[str] = None,
-    job_id: Optional[int] = None
+    job_id: Optional[int] = None,
+    current_user: str = Depends(get_current_user)
 ):
     leads = query_leads(
         search=search,

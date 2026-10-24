@@ -3,6 +3,17 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 
 
+class LoginRequest(BaseModel):
+    username: str = Field(..., description="Admin username")
+    password: str = Field(..., description="Admin password")
+
+
+class AuthResponse(BaseModel):
+    token: str
+    username: str
+    expires_in: int
+
+
 class ScrapeRequest(BaseModel):
     query: str = Field(..., description="Business category or service, e.g. 'Electrician', 'Plumber'")
     location: str = Field(..., description="Target area or city, e.g. 'Ontario, Canada' or 'Mississauga, Ontario'")

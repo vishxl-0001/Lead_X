@@ -7,11 +7,17 @@ import { SearchHistory } from './components/SearchHistory';
 import { LeadDetailModal } from './components/LeadDetailModal';
 import { TemplateModal } from './components/TemplateModal';
 import { ExportModal } from './components/ExportModal';
+import { LoginScreen } from './components/LoginScreen';
 import { api } from './services/api';
 import { LeadItem, ScrapeRequest, JobStatus, StatsResponse, HistoryJob } from './types';
-import { RotateCcw } from 'lucide-react';
+import { RotateCcw, Loader2 } from 'lucide-react';
 
 export const App: React.FC = () => {
+  // Authentication state
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(false);
+  const [currentUser, setCurrentUser] = useState<string>('vishxl');
+  const [checkingAuth, setCheckingAuth] = useState<boolean>(true);
+
   // Navigation: 'live' (current extraction) vs 'history' (past search archives)
   const [activeTab, setActiveTab] = useState<'live' | 'history'>('live');
 
@@ -44,12 +50,27 @@ export const App: React.FC = () => {
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [currentTemplate, setCurrentTemplate] = useState('');
 
-  // Load Initial Template
+  // Verify Authentication on Load
   useEffect(() => {
-    api.getDefaultTemplate().then((tpl) => {
-      if (tpl) setCurrentTemplate(tpl);
+    api.checkAuth().then((res) => {
+      if (res.authenticated) {
+        setIsAuthenticated(true);
+        setCurrentUser(res.username || 'vishxl');
+      } else {
+        setIsAuthenticated(false);
+      }
+      setCheckingAuth(false);
     });
   }, []);
+
+  // Load Initial Template
+  useEffect(() => {
+    if (isAuthenticated) {
+      api.getDefaultTemplate().then((tpl) => {
+        if (tpl) setCurrentTemplate(tpl);
+      });
+    }
+  }, [isAuthenticated]);
 
   // Fetch Stats (silent option to prevent UI jitter)
   const loadStats = useCallback(async (silent = false) => {
@@ -101,10 +122,12 @@ export const App: React.FC = () => {
   );
 
   useEffect(() => {
-    loadLeads();
-    loadStats();
-    loadHistoryJobs();
-  }, [loadLeads, loadStats, loadHistoryJobs]);
+    if (isAuthenticated) {
+      loadLeads();
+      loadStats();
+      loadHistoryJobs();
+    }
+  }, [isAuthenticated, loadLeads, loadStats, loadHistoryJobs]);
 
   // Polling for Active Job — uses silent=true so there is ZERO blinking!
   const startPollingJob = useCallback(
@@ -271,9 +294,29 @@ export const App: React.FC = () => {
     ? `Current Extraction (Run #${currentJobId})`
     : 'All Extracted Leads';
 
+  if (checkingAuth) {
+    return (
+      <div className="min-h-screen bg-slate-950 flex flex-col items-center justify-center space-y-3">
+        <Loader2 className="w-8 h-8 text-emerald-500 animate-spin" />
+        <p className="text-xs text-slate-400 font-mono tracking-wider">INITIALIZING SECURE SESSION...</p>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <LoginScreen
+        onLoginSuccess={(uname) => {
+          setIsAuthenticated(true);
+          setCurrentUser(uname);
+        }}
+      />
+    );
+  }
+
   return (
     <div className="min-h-screen bg-dark-900 text-slate-100 flex flex-col font-sans">
-      {/* Navigation Bar with Tabs */}
+      {/* Navigation Bar with Tabs & User Badge */}
       <Navbar
         activeTab={activeTab}
         onChangeTab={(tab) => {
@@ -283,6 +326,14 @@ export const App: React.FC = () => {
         historyCount={historyJobs.length}
         onOpenTemplate={() => setIsTemplateModalOpen(true)}
         onOpenExport={() => setIsExportModalOpen(true)}
+        currentUser={currentUser}
+        onLogout={() => {
+          api.logout();
+          setIsAuthenticated(false);
+          setLeads([]);
+          setStats(null);
+          setHistoryJobs([]);
+        }}
       />
 
       {/* Main Container */}

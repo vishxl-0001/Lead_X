@@ -1,12 +1,73 @@
-import { LeadItem, ScrapeRequest, JobStatus, StatsResponse, LocationSuggestion, HistoryJob } from '../types';
+import { LeadItem, ScrapeRequest, JobStatus, StatsResponse, LocationSuggestion, HistoryJob, AuthUser } from '../types';
 
 const RAW_URL = ((import.meta as any).env?.VITE_API_URL || '').trim().replace(/\/+$/, '');
 const API_BASE = RAW_URL ? (RAW_URL.endsWith('/api') ? RAW_URL : `${RAW_URL}/api`) : '/api';
 
+const TOKEN_KEY = 'lead_x_auth_token';
+const USERNAME_KEY = 'lead_x_auth_user';
+
+function getAuthHeaders(customHeaders: Record<string, string> = {}): Record<string, string> {
+  const token = localStorage.getItem(TOKEN_KEY);
+  const headers: Record<string, string> = { ...customHeaders };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  return headers;
+}
+
 export const api = {
+  getToken(): string | null {
+    return localStorage.getItem(TOKEN_KEY);
+  },
+
+  getCurrentUser(): string | null {
+    return localStorage.getItem(USERNAME_KEY);
+  },
+
+  logout(): void {
+    localStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(USERNAME_KEY);
+  },
+
+  async login(username: string, password: string): Promise<AuthUser> {
+    const res = await fetch(`${API_BASE}/auth/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || 'Invalid username or password');
+    }
+    const data: AuthUser = await res.json();
+    localStorage.setItem(TOKEN_KEY, data.token);
+    localStorage.setItem(USERNAME_KEY, data.username);
+    return data;
+  },
+
+  async checkAuth(): Promise<{ authenticated: boolean; username: string }> {
+    const token = localStorage.getItem(TOKEN_KEY);
+    if (!token) return { authenticated: false, username: '' };
+    try {
+      const res = await fetch(`${API_BASE}/auth/me`, {
+        headers: getAuthHeaders(),
+      });
+      if (!res.ok) {
+        this.logout();
+        return { authenticated: false, username: '' };
+      }
+      const data = await res.json();
+      return { authenticated: true, username: data.username || 'vishxl' };
+    } catch {
+      return { authenticated: false, username: '' };
+    }
+  },
+
   async getJobs(): Promise<HistoryJob[]> {
     try {
-      const res = await fetch(`${API_BASE}/jobs`);
+      const res = await fetch(`${API_BASE}/jobs`, {
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) return [];
       const data = await res.json();
       return data.jobs || [];
@@ -16,14 +77,19 @@ export const api = {
   },
 
   async deleteJob(jobId: number): Promise<void> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}`, { method: 'DELETE' });
+    const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+      method: 'DELETE',
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) throw new Error('Failed to delete job');
   },
 
   async searchLocations(q: string): Promise<LocationSuggestion[]> {
     if (!q || q.trim().length < 2) return [];
     try {
-      const res = await fetch(`${API_BASE}/locations/search?q=${encodeURIComponent(q)}`);
+      const res = await fetch(`${API_BASE}/locations/search?q=${encodeURIComponent(q)}`, {
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) return [];
       const data = await res.json();
       return data.results || [];
@@ -35,7 +101,9 @@ export const api = {
   async getSubAreas(region: string): Promise<string[]> {
     if (!region) return [];
     try {
-      const res = await fetch(`${API_BASE}/locations/sub-areas?region=${encodeURIComponent(region)}`);
+      const res = await fetch(`${API_BASE}/locations/sub-areas?region=${encodeURIComponent(region)}`, {
+        headers: getAuthHeaders(),
+      });
       if (!res.ok) return [];
       const data = await res.json();
       return data.sub_areas || [];
@@ -47,7 +115,7 @@ export const api = {
   async startScrape(payload: ScrapeRequest): Promise<{ status: string; job_id: number; message: string }> {
     const res = await fetch(`${API_BASE}/scrape`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(payload),
     });
     if (!res.ok) throw new Error('Failed to start scrape task');
@@ -55,13 +123,18 @@ export const api = {
   },
 
   async getJobStatus(jobId: number): Promise<JobStatus> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}`);
+    const res = await fetch(`${API_BASE}/jobs/${jobId}`, {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) throw new Error('Failed to get job status');
     return res.json();
   },
 
   async stopJob(jobId: number): Promise<void> {
-    const res = await fetch(`${API_BASE}/jobs/${jobId}/stop`, { method: 'POST' });
+    const res = await fetch(`${API_BASE}/jobs/${jobId}/stop`, {
+      method: 'POST',
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) throw new Error('Failed to stop job');
   },
 
@@ -83,7 +156,9 @@ export const api = {
     if (params?.limit) query.set('limit', String(params.limit));
     if (params?.offset) query.set('offset', String(params.offset));
 
-    const res = await fetch(`${API_BASE}/leads?${query.toString()}`);
+    const res = await fetch(`${API_BASE}/leads?${query.toString()}`, {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) throw new Error('Failed to fetch leads');
     return res.json();
   },
@@ -91,7 +166,7 @@ export const api = {
   async updateLead(leadId: number, update: { status?: string; notes?: string; owner_name?: string }): Promise<void> {
     const res = await fetch(`${API_BASE}/leads/${leadId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
+      headers: getAuthHeaders({ 'Content-Type': 'application/json' }),
       body: JSON.stringify(update),
     });
     if (!res.ok) throw new Error('Failed to update lead');
@@ -100,6 +175,7 @@ export const api = {
   async deleteLead(leadId: number): Promise<void> {
     const res = await fetch(`${API_BASE}/leads/${leadId}`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Failed to delete lead');
   },
@@ -107,18 +183,23 @@ export const api = {
   async clearAllLeads(): Promise<void> {
     const res = await fetch(`${API_BASE}/leads`, {
       method: 'DELETE',
+      headers: getAuthHeaders(),
     });
     if (!res.ok) throw new Error('Failed to clear leads');
   },
 
   async getStats(): Promise<StatsResponse> {
-    const res = await fetch(`${API_BASE}/stats`);
+    const res = await fetch(`${API_BASE}/stats`, {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) throw new Error('Failed to fetch statistics');
     return res.json();
   },
 
   async getDefaultTemplate(): Promise<string> {
-    const res = await fetch(`${API_BASE}/template`);
+    const res = await fetch(`${API_BASE}/template`, {
+      headers: getAuthHeaders(),
+    });
     if (!res.ok) return '';
     const data = await res.json();
     return data.template || '';
@@ -131,6 +212,8 @@ export const api = {
     if (params?.mobile_only) query.set('mobile_only', 'true');
     if (params?.status && params.status !== 'All') query.set('status', params.status);
     if (params?.job_id !== undefined) query.set('job_id', String(params.job_id));
+    const token = this.getToken();
+    if (token) query.set('token', token);
     return `${API_BASE}/export/csv?${query.toString()}`;
   },
 
@@ -141,6 +224,8 @@ export const api = {
     if (params?.mobile_only) query.set('mobile_only', 'true');
     if (params?.status && params.status !== 'All') query.set('status', params.status);
     if (params?.job_id !== undefined) query.set('job_id', String(params.job_id));
+    const token = this.getToken();
+    if (token) query.set('token', token);
     return `${API_BASE}/export/vcf?${query.toString()}`;
   },
 };

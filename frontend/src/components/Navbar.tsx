@@ -1,5 +1,5 @@
 import React from 'react';
-import { Target, History, MessageSquareCode, Download, Sparkles } from 'lucide-react';
+import { Target, History, MessageSquareCode, Download, Sparkles, ShieldCheck, LogOut } from 'lucide-react';
 
 interface NavbarProps {
   activeTab: 'live' | 'history';
@@ -7,6 +7,8 @@ interface NavbarProps {
   historyCount: number;
   onOpenTemplate: () => void;
   onOpenExport: () => void;
+  currentUser?: string;
+  onLogout?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -15,6 +17,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   historyCount,
   onOpenTemplate,
   onOpenExport,
+  currentUser = 'vishxl',
+  onLogout,
 }) => {
   return (
     <header className="border-b border-dark-700 bg-dark-800/80 backdrop-blur-md sticky top-0 z-40">
@@ -88,6 +92,27 @@ export const Navbar: React.FC<NavbarProps> = ({
             <Download className="w-4 h-4" />
             <span>Export</span>
           </button>
+
+          {/* Admin User Badge & Logout */}
+          <div className="h-5 w-[1px] bg-dark-700 hidden sm:block" />
+
+          <div className="flex items-center space-x-1 sm:space-x-2">
+            <div className="hidden md:flex items-center space-x-1.5 px-2.5 py-1.5 rounded-lg bg-dark-900 border border-dark-700 text-xs">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+              <span className="font-mono text-emerald-300 font-semibold">{currentUser}</span>
+            </div>
+
+            {onLogout && (
+              <button
+                onClick={onLogout}
+                title="Log Out of Lead_X Admin"
+                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg border border-dark-700 bg-dark-900 hover:bg-rose-950/40 hover:border-rose-800/60 text-slate-400 hover:text-rose-300 text-xs font-medium transition-colors"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">Logout</span>
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </header>
