@@ -101,14 +101,15 @@ def save_or_update_lead(lead: LeadItem) -> Optional[int]:
                     rating = COALESCE(?, rating),
                     reviews_count = COALESCE(?, reviews_count),
                     owner_name = COALESCE(?, owner_name),
-                    whatsapp_link = COALESCE(?, whatsapp_link)
+                    whatsapp_link = COALESCE(?, whatsapp_link),
+                    job_id = COALESCE(?, job_id)
                 WHERE id = ?
             """, (
                 lead.title, lead.category, lead.address, lead.city,
                 lead.phone_raw, lead.phone_clean, 1 if lead.is_mobile else 0,
                 1 if lead.has_website else 0, lead.website_url,
                 lead.rating, lead.reviews_count, lead.owner_name,
-                lead.whatsapp_link, lead_id
+                lead.whatsapp_link, lead.job_id, lead_id
             ))
             conn.commit()
             return lead_id

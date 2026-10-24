@@ -22,35 +22,52 @@ def clean_phone_number(raw_phone: str, default_region: str = "IN") -> Tuple[Opti
     if not raw_phone:
         return None, False, "No phone provided"
 
-    cleaned = re.sub(r"[^\d+]", "", raw_phone)
-    if not cleaned:
-        return None, False, "Invalid number"
-
     region = default_region.upper()
 
     if HAS_PHONENUMBERS:
         try:
+            # 1. Use PhoneNumberMatcher to extract valid phone from noisy text (e.g. "Open 24 hours · +64 21 ...")
+            matcher = phonenumbers.PhoneNumberMatcher(raw_phone, region)
+            for match in matcher:
+                parsed = match.number
+                if phonenumbers.is_valid_number(parsed):
+                    e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
+                    num_type = phonenumbers.number_type(parsed)
+                    is_mob = num_type in (
+                        PhoneNumberType.MOBILE,
+                        PhoneNumberType.FIXED_LINE_OR_MOBILE,
+                        PhoneNumberType.PERSONAL_NUMBER
+                    )
+                    info = carrier.name_for_number(parsed, "en") or geocoder.description_for_number(parsed, "en") or "Valid"
+                    return e164, is_mob, info
+
+            # 2. Direct parse attempt if matcher found nothing
             parsed = phonenumbers.parse(raw_phone, region)
             if not phonenumbers.is_valid_number(parsed):
+                cleaned = re.sub(r"[^\d+]", "", raw_phone)
                 parsed = phonenumbers.parse(cleaned, region)
             
             if phonenumbers.is_valid_number(parsed):
                 e164 = phonenumbers.format_number(parsed, phonenumbers.PhoneNumberFormat.E164)
                 num_type = phonenumbers.number_type(parsed)
-                
-                # Check mobile vs fixed line
                 is_mob = num_type in (
                     PhoneNumberType.MOBILE,
                     PhoneNumberType.FIXED_LINE_OR_MOBILE,
                     PhoneNumberType.PERSONAL_NUMBER
                 )
-                
                 info = carrier.name_for_number(parsed, "en") or geocoder.description_for_number(parsed, "en") or "Valid"
                 return e164, is_mob, info
+            
+            # If phonenumbers library determined it's not a valid number, do not guess
+            return None, False, "Invalid number"
         except Exception:
-            pass
+            return None, False, "Invalid number"
 
-    # Regex heuristic fallbacks when phonenumbers library is missing or fails
+    # Only reached if phonenumbers library is not installed
+    # Ensure text looks like an isolated phone number (no letters)
+    if re.search(r"[a-zA-Z]", raw_phone):
+        return None, False, "Contains text"
+
     digits = re.sub(r"\D", "", raw_phone)
     dial_prefix = GLOBAL_COUNTRIES.get(region, {}).get("dial_code", "+91")
 

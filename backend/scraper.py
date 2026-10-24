@@ -172,16 +172,32 @@ class GoogleMapsScraper:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
-                    "--disable-infobars",
-                    "--window-size=1366,768",
+                    "--single-process",
+                    "--no-zygote",
+                    "--renderer-process-limit=1",
+                    "--js-flags=--max-old-space-size=64",
+                    "--disable-extensions",
+                    "--disable-background-networking",
+                    "--disable-default-apps",
+                    "--disable-sync",
+                    "--no-first-run",
+                    "--mute-audio",
+                    "--disable-features=AudioServiceOutOfProcess,IsolateOrigins,site-per-process,Translate,BackForwardCache",
+                    "--window-size=1024,600",
                 ],
             )
             context: BrowserContext = await browser.new_context(
-                viewport={"width": 1366, "height": 768},
+                viewport={"width": 1024, "height": 600},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 locale="en-US",
             )
             page: Page = await context.new_page()
+
+            # Abort heavy photo carousels, media, and fonts to prevent OOM memory spikes on cloud containers
+            await page.route(
+                "**/*",
+                lambda r: r.abort() if r.request.resource_type in ["image", "media", "font"] else r.continue_()
+            )
 
             try:
                 try:
@@ -192,13 +208,30 @@ class GoogleMapsScraper:
                 if self.progress_callback:
                     self.progress_callback(0, 0, 0, f"Loading Google Maps around {self.location} ({self.radius_km} km radius)...")
 
-                await page.goto(maps_url, timeout=35000, wait_until="domcontentloaded")
+                navigated = False
+                for attempt in range(3):
+                    try:
+                        await page.goto(maps_url, timeout=35000, wait_until="domcontentloaded")
+                        navigated = True
+                        break
+                    except Exception as nav_err:
+                        logger.warning(f"Maps navigation attempt {attempt + 1} failed: {nav_err}. Retrying in 2s...")
+                        await asyncio.sleep(2.0)
+
+                if not navigated:
+                    raise RuntimeError(f"Failed to navigate to Google Maps after 3 attempts.")
+
                 await asyncio.sleep(2.0)
 
                 # Dismiss consent dialogs if present
-                for btn_text in ["Accept all", "I agree", "Agree", "Reject all"]:
+                for consent_sel in [
+                    "button:has-text('Accept all')", "button:has-text('I agree')",
+                    "button:has-text('Agree')", "button:has-text('Reject all')",
+                    "button[aria-label*='Accept' i]", "button[aria-label*='Agree' i]",
+                    "form[action*='consent'] button", "div[role='dialog'] button"
+                ]:
                     try:
-                        consent_btn = page.locator(f"button:has-text('{btn_text}')").first
+                        consent_btn = page.locator(consent_sel).first
                         if await consent_btn.is_visible(timeout=1500):
                             await consent_btn.click()
                             await asyncio.sleep(1.0)
@@ -252,165 +285,27 @@ class GoogleMapsScraper:
                             self.total_scanned += 1
 
                             card_text = await card.inner_text()
-                            if not title:
-                                lines = card_text.split("\n")
-                                title = lines[0].strip() if lines else "Business"
+                            lines = [l.strip() for l in card_text.split("\n") if l.strip()]
+                            if not title and lines:
+                                title = lines[0]
 
-                            # 2. Extract Rating from card (e.g. '4.8 stars' or span '4.8')
-                            rating = None
-                            star_el = card.locator('[aria-label*="star" i]').first
-                            if await star_el.count() > 0:
-                                s_aria = await star_el.get_attribute("aria-label") or ""
-                                m_star = re.search(r'([1-5]\.[0-9])', s_aria)
-                                if m_star:
-                                    rating = float(m_star.group(1))
-
-                            if not rating:
-                                for s_txt in await card.locator("span").all_inner_texts():
-                                    if re.match(r'^[1-5]\.[0-9]$', s_txt.strip()):
-                                        rating = float(s_txt.strip())
-                                        break
-
-                            # 3. Extract Reviews Count
-                            reviews_count = None
-                            m_rev = re.search(r'\(([0-9,KM\.]+)\)', card_text)
-                            if m_rev:
-                                raw_rev = m_rev.group(1).replace(",", "")
-                                if "k" in raw_rev.lower():
-                                    reviews_count = int(float(raw_rev.lower().replace("k", "")) * 1000)
-                                else:
-                                    reviews_count = int(float(raw_rev))
-
-                            # 4. Check Website Presence & URL on Feed Card first
+                            # 2. Extract Website directly from Card links
                             card_web_url = None
-                            for w_sel in ["a[data-value='Website']", "a[aria-label*='website' i]", "a[data-tooltip*='website' i]"]:
-                                w_el = card.locator(w_sel).first
-                                if await w_el.count() > 0:
-                                    h = await w_el.get_attribute("href")
-                                    if h and h.startswith("http") and "google.com" not in h and "gstatic.com" not in h:
-                                        card_web_url = h
-                                        break
-
-                            # 5. Extract Phone from Feed Card (DOM or Text)
-                            card_phone = None
-                            for tel_el in await card.locator("a[href^='tel:'], [data-item-id^='phone:tel:']").all():
-                                h = await tel_el.get_attribute("href") or ""
-                                did = await tel_el.get_attribute("data-item-id") or ""
-                                val = h.replace("tel:", "").strip() or did.replace("phone:tel:", "").strip()
-                                clean_test, _, _ = clean_phone_number(val, self.country_code)
-                                if clean_test:
-                                    card_phone = clean_test
+                            for a in await card.locator("a").all():
+                                h = await a.get_attribute("href") or ""
+                                aria = (await a.get_attribute("aria-label") or "").lower()
+                                if ("website" in aria or "web" in aria) and h.startswith("http") and "google.com" not in h and "gstatic.com" not in h:
+                                    card_web_url = h
+                                    break
+                                elif h.startswith("http") and "google.com" not in h and "gstatic.com" not in h and "/maps/" not in h:
+                                    card_web_url = h
                                     break
 
-                            if not card_phone:
-                                for cand in PHONE_PATTERN.findall(card_text):
-                                    if sum(c.isdigit() for c in cand) >= 7 and not cand.startswith(("202", "199")) and ":" not in cand:
-                                        clean_test, _, _ = clean_phone_number(cand, self.country_code)
-                                        if clean_test:
-                                            card_phone = clean_test
-                                            break
+                            has_website = bool(card_web_url)
 
-                            # 6. Click card to open the detail panel for deep verification
-                            await card.scroll_into_view_if_needed()
-                            await link_el.click()
-                            await asyncio.sleep(1.5)
-
-                            detail_pane = page.locator('div[role="main"][aria-label]').first
-                            has_detail = await detail_pane.count() > 0
-
-                            detail_web_url = None
-                            detail_phone = None
-                            detail_address = None
-                            detail_text = ""
-
-                            if has_detail:
-                                detail_text = await detail_pane.inner_text()
-
-                                # Deep Website Verification in Detail Pane
-                                for we in await detail_pane.locator("a[data-item-id='authority'], a[aria-label*='website' i], a[data-tooltip*='website' i], a[aria-label*='Website' i]").all():
-                                    u = await we.get_attribute("href")
-                                    if u and u.startswith("http") and "google.com" not in u and "gstatic.com" not in u:
-                                        detail_web_url = u
-                                        break
-
-                                if not detail_web_url:
-                                    # Check Io6YTe rows for domain names
-                                    for row in await detail_pane.locator("div.Io6YTe, span.Io6YTe").all_inner_texts():
-                                        dm = DOMAIN_PATTERN.search(row)
-                                        if dm and not any(ign in row.lower() for ign in ["google", "facebook", "instagram", "twitter", "apple"]):
-                                            detail_web_url = f"https://{dm.group(1)}"
-                                            break
-
-                                # Deep Phone Extraction in Detail Pane
-                                for pel in await detail_pane.locator("a[href^='tel:'], [data-item-id^='phone:tel:'], [aria-label*='Phone:' i], button[data-tooltip*='phone' i]").all():
-                                    href = await pel.get_attribute("href") or ""
-                                    did = await pel.get_attribute("data-item-id") or ""
-                                    aria = await pel.get_attribute("aria-label") or ""
-                                    for s in [href.replace("tel:", ""), did.replace("phone:tel:", ""), aria.replace("Phone:", "")]:
-                                        clean_test, _, _ = clean_phone_number(s, self.country_code)
-                                        if clean_test:
-                                            detail_phone = clean_test
-                                            break
-                                    if detail_phone:
-                                        break
-
-                                if not detail_phone:
-                                    for row in await detail_pane.locator("div.Io6YTe, span.Io6YTe").all_inner_texts():
-                                        for cand in PHONE_PATTERN.findall(row):
-                                            if sum(c.isdigit() for c in cand) >= 7 and not cand.startswith(("202", "199")) and ":" not in cand:
-                                                clean_test, _, _ = clean_phone_number(cand, self.country_code)
-                                                if clean_test:
-                                                    detail_phone = clean_test
-                                                    break
-                                        if detail_phone:
-                                            break
-
-                                if not detail_phone and detail_text:
-                                    for cand in PHONE_PATTERN.findall(detail_text):
-                                        if sum(c.isdigit() for c in cand) >= 7 and not cand.startswith(("202", "199")) and ":" not in cand:
-                                            clean_test, _, _ = clean_phone_number(cand, self.country_code)
-                                            if clean_test:
-                                                detail_phone = clean_test
-                                                break
-
-                                # Detail Address
-                                addr_el = detail_pane.locator("[data-item-id='address'], [aria-label*='Address:' i]").first
-                                if await addr_el.count() > 0:
-                                    detail_address = (await addr_el.inner_text()).strip()
-                                if not detail_address:
-                                    for row in (await detail_pane.locator("div.Io6YTe").all_inner_texts())[:2]:
-                                        if any(term in row for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place", "Hwy", "Lane", "No"]):
-                                            detail_address = row.strip()
-                                            break
-
-                                # Detail Rating
-                                if not rating:
-                                    f7_el = detail_pane.locator("div.F7nice span[aria-hidden='true']").first
-                                    if await f7_el.count() > 0:
-                                        t = (await f7_el.inner_text()).strip()
-                                        if re.match(r'^[1-5]\.[0-9]$', t):
-                                            rating = float(t)
-
-                                # Detail Reviews
-                                if not reviews_count:
-                                    for rev_el in await detail_pane.locator("button[aria-label*='review' i], span[aria-label*='review' i]").all():
-                                        r_aria = await rev_el.get_attribute("aria-label") or ""
-                                        m_rev_aria = re.search(r'([0-9,]+)\s+review', r_aria, re.IGNORECASE)
-                                        if m_rev_aria:
-                                            reviews_count = int(m_rev_aria.group(1).replace(",", ""))
-                                            break
-                                    if not reviews_count:
-                                        m_rev2 = re.search(r'\b([0-9,]+)\s+reviews?\b', detail_text, re.IGNORECASE)
-                                        if m_rev2:
-                                            reviews_count = int(m_rev2.group(1).replace(",", ""))
-
-                            # 7. Unified Merged Resolution
-                            website_url = detail_web_url or card_web_url
-                            has_website = bool(website_url)
-
-                            # If user strictly wants Zero-Website leads and this business has one, skip
+                            # Filter Zero-Website strictly if requested
                             if self.no_website_only and has_website:
-                                logger.info(f"Skipping {title} (Has Website: {website_url})")
+                                logger.info(f"Skipping {title} (Has Website: {card_web_url})")
                                 if self.progress_callback:
                                     self.progress_callback(
                                         self.total_scanned,
@@ -423,9 +318,25 @@ class GoogleMapsScraper:
                             if not has_website:
                                 self.no_website_count += 1
 
-                            # Phone resolution
-                            phone_raw = detail_phone or card_phone
-                            phone_clean, is_mob, info = clean_phone_number(phone_raw or "", self.country_code)
+                            # 3. Extract Phone & Mobile Detection
+                            phone_clean, is_mob = None, False
+                            phone_raw = None
+                            for cand in lines:
+                                c, m, _ = clean_phone_number(cand, self.country_code)
+                                if c:
+                                    phone_clean, is_mob = c, m
+                                    phone_raw = cand
+                                    break
+                            if not phone_clean:
+                                for tel_el in await card.locator("a[href^='tel:'], [data-item-id^='phone:tel:']").all():
+                                    h = await tel_el.get_attribute("href") or ""
+                                    did = await tel_el.get_attribute("data-item-id") or ""
+                                    val = h.replace("tel:", "").strip() or did.replace("phone:tel:", "").strip()
+                                    c, m, _ = clean_phone_number(val, self.country_code)
+                                    if c:
+                                        phone_clean, is_mob = c, m
+                                        phone_raw = val
+                                        break
 
                             # Filter mobile if toggled
                             if self.mobile_only and not is_mob:
@@ -434,23 +345,47 @@ class GoogleMapsScraper:
                                         self.total_scanned,
                                         self.no_website_count,
                                         self.mobile_count,
-                                        f"Skipped {title} (Landline: {phone_raw})",
+                                        f"Skipped {title} (Non-mobile: {phone_clean or 'None'})",
                                     )
                                 continue
 
                             if phone_clean:
                                 self.mobile_count += 1
 
-                            # Address resolution & cleaning
-                            raw_addr = detail_address
-                            if not raw_addr:
-                                for line in card_text.split("\n"):
-                                    if any(term in line for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place"]):
-                                        if " · " in line:
-                                            raw_addr = line.split(" · ")[-1].strip()
-                                        else:
-                                            raw_addr = line.strip().lstrip("·").strip()
+                            # 4. Extract Rating & Reviews
+                            rating = None
+                            reviews_count = None
+                            for line in lines:
+                                m_rat = re.search(r'\b([1-5]\.[0-9])\b', line)
+                                if m_rat:
+                                    rating = float(m_rat.group(1))
+                                    break
+
+                            m_rev = re.search(r'\(([0-9,KM\.]+)\)', card_text)
+                            if m_rev:
+                                raw_rev = m_rev.group(1).replace(",", "")
+                                if "k" in raw_rev.lower():
+                                    reviews_count = int(float(raw_rev.lower().replace("k", "")) * 1000)
+                                else:
+                                    try:
+                                        reviews_count = int(float(raw_rev))
+                                    except Exception:
+                                        pass
+
+                            # 5. Extract Address
+                            raw_addr = None
+                            for line in lines:
+                                if "·" in line and not any(kw in line.lower() for kw in ["open", "closed", "opens", "closes", "hour"]):
+                                    parts = line.split("·")
+                                    if len(parts) >= 2:
+                                        raw_addr = parts[1].strip()
                                         break
+                            if not raw_addr:
+                                for line in lines:
+                                    if any(term in line for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place", "Lane", "Hwy", "Highway"]):
+                                        raw_addr = line.split("·")[-1].strip() if "·" in line else line.strip()
+                                        break
+
                             address = re.sub(r'[\ue000-\uf8ff]', '', raw_addr or '').strip() if raw_addr else self.location
                             address = re.sub(r'^Address:\s*', '', address, flags=re.IGNORECASE).strip()
                             address = " ".join(line.strip() for line in address.splitlines() if line.strip())
@@ -461,7 +396,7 @@ class GoogleMapsScraper:
 
                             owner_name = self._extract_owner_name(title)
 
-                            # 10. Generate WhatsApp Link
+                            # 6. Generate WhatsApp Link
                             whatsapp_link = None
                             if phone_clean:
                                 context_dict = {
@@ -478,11 +413,11 @@ class GoogleMapsScraper:
                                 category=self.query,
                                 address=address or self.location,
                                 city=self.location,
-                                phone_raw=phone_raw,
+                                phone_raw=phone_raw or phone_clean,
                                 phone_clean=phone_clean or phone_raw,
                                 is_mobile=is_mob,
                                 has_website=has_website,
-                                website_url=website_url,
+                                website_url=card_web_url,
                                 rating=rating,
                                 reviews_count=reviews_count,
                                 owner_name=owner_name,
@@ -519,7 +454,7 @@ class GoogleMapsScraper:
                         logger.info("Reached the end of Google Maps results.")
                         break
 
-                    # Scroll the feed down to load the next batch of cards!
+                    # Scroll the feed down with scrollTop = scrollHeight and PageDown!
                     if await feed_locator.count() > 0:
                         if self.progress_callback:
                             self.progress_callback(
@@ -528,11 +463,13 @@ class GoogleMapsScraper:
                                 self.mobile_count,
                                 f"Scrolling for more leads ({len(self.leads_collected)}/{self.target_count} collected)...",
                             )
-                        await feed_locator.evaluate("el => el.scrollBy(0, 2500)")
-                        await asyncio.sleep(1.8)
+                        await feed_locator.evaluate("el => el.scrollTop = el.scrollHeight")
+                        await page.keyboard.press("PageDown")
+                        await asyncio.sleep(2.0)
                     else:
                         await page.mouse.wheel(0, 2500)
-                        await asyncio.sleep(1.8)
+                        await page.keyboard.press("PageDown")
+                        await asyncio.sleep(2.0)
 
                     if new_items_processed == 0:
                         idle_scroll_attempts += 1
@@ -546,6 +483,7 @@ class GoogleMapsScraper:
                 logger.error(f"Scraper error: {e}")
                 if self.progress_callback:
                     self.progress_callback(self.total_scanned, self.no_website_count, self.mobile_count, f"Error: {e}")
+                raise e
             finally:
                 await context.close()
                 await browser.close()
