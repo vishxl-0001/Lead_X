@@ -172,12 +172,13 @@ class GoogleMapsScraper:
                     "--disable-setuid-sandbox",
                     "--disable-dev-shm-usage",
                     "--disable-gpu",
+                    "--disable-software-rasterizer",
+                    "--blink-settings=imagesEnabled=false",
                     "--single-process",
                     "--no-zygote",
                     "--renderer-process-limit=1",
                     "--js-flags=--max-old-space-size=64",
                     "--disable-extensions",
-                    "--disable-background-networking",
                     "--disable-default-apps",
                     "--disable-sync",
                     "--no-first-run",
@@ -191,6 +192,11 @@ class GoogleMapsScraper:
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
                 locale="en-US",
             )
+            # Pre-inject Google consent cookies to bypass regional cookie walls & modals (US/EU datacenters)
+            await context.add_cookies([
+                {"name": "SOCS", "value": "CAESHAgBEhJnd3NfMjAyNDA0MTUtMF9SQzIaAmVuIAEaBgiA_LyuBg", "domain": ".google.com", "path": "/"},
+                {"name": "CONSENT", "value": "PENDING+999", "domain": ".google.com", "path": "/"},
+            ])
             page: Page = await context.new_page()
 
             # Abort heavy photo carousels, media, and fonts to prevent OOM memory spikes on cloud containers

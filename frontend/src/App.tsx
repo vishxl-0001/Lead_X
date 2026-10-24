@@ -133,10 +133,12 @@ export const App: React.FC = () => {
   const startPollingJob = useCallback(
     (jobId: number) => {
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current);
+      let consecutiveErrors = 0;
 
       pollIntervalRef.current = window.setInterval(async () => {
         try {
           const job = await api.getJobStatus(jobId);
+          consecutiveErrors = 0;
           setActiveJob(job);
 
           // Silent background update: appends new leads without unmounting table or blinking
@@ -152,12 +154,16 @@ export const App: React.FC = () => {
             loadHistoryJobs();
           }
         } catch (err) {
-          console.error('Job polling error:', err);
-          if (pollIntervalRef.current) {
-            clearInterval(pollIntervalRef.current);
-            pollIntervalRef.current = null;
+          consecutiveErrors++;
+          console.warn(`Job polling transient hiccup (${consecutiveErrors}/10):`, err);
+          // Only stop if the server is permanently down after 10 consecutive failed attempts (15 seconds)
+          if (consecutiveErrors >= 10) {
+            if (pollIntervalRef.current) {
+              clearInterval(pollIntervalRef.current);
+              pollIntervalRef.current = null;
+            }
+            setIsScraping(false);
           }
-          setIsScraping(false);
         }
       }, 1500);
     },
