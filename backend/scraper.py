@@ -109,6 +109,8 @@ class GoogleMapsScraper:
         self.mobile_count = 0
         self.leads_collected: List[LeadItem] = []
         self.seen_place_ids = set()
+        self.seen_titles = set()
+        self.phone_cache: Dict[str, str] = {}
 
     def stop(self):
         self.is_running = False
@@ -128,6 +130,203 @@ class GoogleMapsScraper:
                 return candidate
 
         return None
+
+    def _parse_tbm_response(self, body: str) -> List[Dict]:
+        """Parses Google Maps internal JSON RPC responses to extract accurate phone numbers, addresses, and details."""
+        clean = body
+        for prefix in ["/*)]}'\n", "/*)]}'", ")]}'\n", ")]}'"]:
+            if clean.startswith(prefix):
+                clean = clean[len(prefix):]
+                break
+        try:
+            data = json.loads(clean)
+        except Exception:
+            return []
+
+        leads = []
+        def scan_list(lst):
+            res = []
+            for item in lst:
+                if isinstance(item, list) and len(item) > 1 and isinstance(item[1], list):
+                    info = item[1]
+                    if len(info) > 11 and isinstance(info[11], str) and info[11].strip():
+                        res.append(info)
+            return res
+
+        candidates = []
+        if isinstance(data, list):
+            for sub in data:
+                if isinstance(sub, list):
+                    cand = scan_list(sub)
+                    if cand:
+                        candidates.extend(cand)
+
+        for info in candidates:
+            title = info[11].strip()
+
+            phone = None
+            if len(info) > 178 and isinstance(info[178], list) and len(info[178]) > 0:
+                p0 = info[178][0]
+                if isinstance(p0, list):
+                    if len(p0) > 1 and isinstance(p0[1], list):
+                        for sub in p0[1]:
+                            if isinstance(sub, list) and len(sub) > 0 and str(sub[0]).strip().startswith("+"):
+                                phone = str(sub[0]).strip()
+                                break
+                    if not phone and len(p0) > 0 and p0[0]:
+                        phone = str(p0[0]).strip()
+                    if not phone and len(p0) > 3 and p0[3]:
+                        phone = str(p0[3]).strip()
+
+            website = None
+            if len(info) > 7 and isinstance(info[7], list) and len(info[7]) > 0 and info[7][0]:
+                website = str(info[7][0]).strip()
+
+            address = None
+            if len(info) > 39 and isinstance(info[39], str) and info[39].strip():
+                address = info[39].strip()
+            elif len(info) > 18 and isinstance(info[18], str) and info[18].strip():
+                address = info[18].strip()
+            elif len(info) > 2 and isinstance(info[2], list) and len(info[2]) > 0:
+                address = ", ".join(str(x) for x in info[2] if x)
+
+            rating = None
+            if len(info) > 4 and isinstance(info[4], list) and len(info[4]) > 7 and isinstance(info[4][7], (int, float)):
+                rating = float(info[4][7])
+
+            reviews_count = None
+            if len(info) > 37 and isinstance(info[37], list) and len(info[37]) > 1 and isinstance(info[37][1], (int, float)):
+                reviews_count = int(info[37][1])
+            elif len(info) > 4 and isinstance(info[4], list) and len(info[4]) > 8 and isinstance(info[4][8], (int, float)):
+                reviews_count = int(info[4][8])
+
+            place_id = None
+            if len(info) > 78 and isinstance(info[78], str) and info[78].strip():
+                place_id = info[78].strip()
+            elif len(info) > 10 and isinstance(info[10], str) and info[10].strip():
+                place_id = info[10].strip()
+
+            leads.append({
+                "title": title,
+                "phone": phone,
+                "website": website,
+                "address": address,
+                "rating": rating,
+                "reviews_count": reviews_count,
+                "place_id": place_id,
+            })
+        return leads
+
+    def _process_lead_dict(self, item: Dict) -> bool:
+        """Processes a lead extracted from Google Maps payload or card. Returns True if accepted."""
+        if not self.is_running or len(self.leads_collected) >= self.target_count:
+            return False
+
+        title = item.get("title", "").strip()
+        if not title:
+            return False
+
+        place_id = item.get("place_id") or f"{title}_{self.location}"
+        norm_title = re.sub(r"[^a-zA-Z0-9]", "", title).lower()
+
+        raw_phone = item.get("phone")
+        if raw_phone:
+            self.phone_cache[title] = raw_phone
+            self.phone_cache[norm_title] = raw_phone
+            if place_id:
+                self.phone_cache[place_id] = raw_phone
+
+        if place_id in self.seen_place_ids or norm_title in self.seen_titles:
+            return False
+
+        self.seen_place_ids.add(place_id)
+        self.seen_titles.add(norm_title)
+        self.total_scanned += 1
+
+        website = item.get("website")
+        has_website = bool(website)
+        if not has_website:
+            self.no_website_count += 1
+
+        if self.no_website_only and has_website:
+            if self.progress_callback:
+                self.progress_callback(
+                    self.total_scanned,
+                    self.no_website_count,
+                    self.mobile_count,
+                    f"Skipped {title} (Has Website)",
+                )
+            return False
+
+        phone_clean, is_mob = None, False
+        if raw_phone:
+            phone_clean, is_mob, _ = clean_phone_number(raw_phone, self.country_code)
+
+        if self.mobile_only and not is_mob:
+            if self.progress_callback:
+                self.progress_callback(
+                    self.total_scanned,
+                    self.no_website_count,
+                    self.mobile_count,
+                    f"Skipped {title} (Non-mobile: {phone_clean or 'None'})",
+                )
+            return False
+
+        if phone_clean:
+            self.mobile_count += 1
+
+        rating = item.get("rating")
+        if self.min_rating > 0 and (rating or 0.0) < self.min_rating:
+            return False
+
+        owner_name = self._extract_owner_name(title)
+        whatsapp_link = None
+        if phone_clean:
+            context_dict = {
+                "business_name": title,
+                "area": self.location,
+                "category": self.query,
+                "owner_name": owner_name or "there",
+            }
+            whatsapp_link = generate_whatsapp_link(phone_clean, self.template, context_dict)
+
+        clean_addr = item.get("address") or self.location
+        clean_addr = re.sub(r'[\ue000-\uf8ff]', '', clean_addr).strip()
+        clean_addr = re.sub(r'^Address:\s*', '', clean_addr, flags=re.IGNORECASE).strip()
+
+        lead = LeadItem(
+            place_id=place_id,
+            title=title,
+            category=self.query,
+            address=clean_addr or self.location,
+            city=self.location,
+            phone_raw=raw_phone or phone_clean,
+            phone_clean=phone_clean or raw_phone,
+            is_mobile=is_mob,
+            has_website=has_website,
+            website_url=website,
+            rating=rating,
+            reviews_count=item.get("reviews_count"),
+            owner_name=owner_name,
+            whatsapp_link=whatsapp_link,
+            job_id=self.job_id,
+            created_at=datetime.now().isoformat(),
+        )
+
+        self.leads_collected.append(lead)
+        logger.info(f"Captured ({len(self.leads_collected)}/{self.target_count}): {lead.title} | Phone: {lead.phone_clean} | Web: {lead.has_website}")
+
+        if self.lead_callback:
+            self.lead_callback(lead)
+
+        if self.progress_callback:
+            self.progress_callback(
+                self.total_scanned,
+                self.no_website_count,
+                self.mobile_count,
+                f"Captured ({len(self.leads_collected)}/{self.target_count}): {lead.title}",
+            )
+        return True
 
     def _build_maps_search_url(self) -> str:
         """
@@ -214,11 +413,29 @@ class GoogleMapsScraper:
                 lambda r: r.abort() if (
                     r.request.resource_type in ["image", "media", "font", "stylesheet"]
                     or any(k in r.request.url for k in [
-                        "/maps/vt", "/maps/preview", "geometry", "vector",
+                        "/maps/vt", "geometry", "vector",
                         "google-analytics", "play.google.com/log", "stats"
                     ])
                 ) else r.continue_()
             )
+
+            # Listen to Google Maps response streams to extract rich verified business profiles and phone numbers
+            async def on_response(response):
+                if not self.is_running or len(self.leads_collected) >= self.target_count:
+                    return
+                url = response.url
+                if "tbm=map" in url or "/search?" in url:
+                    try:
+                        text = await response.text()
+                        items = self._parse_tbm_response(text)
+                        for item in items:
+                            if not self.is_running or len(self.leads_collected) >= self.target_count:
+                                break
+                            self._process_lead_dict(item)
+                    except Exception as e:
+                        logger.debug(f"Response parser warning: {e}")
+
+            page.on("response", on_response)
 
             try:
                 try:
@@ -278,39 +495,47 @@ class GoogleMapsScraper:
                     if len(cards) == 0:
                         cards = await page.locator("a[href*='/maps/place/']").all()
 
-                    new_items_processed = 0
+                    # Scroll the last card into view to trigger lazy rendering and subsequent network responses
+                    if cards:
+                        try:
+                            await cards[-1].scroll_into_view_if_needed(timeout=2500)
+                        except Exception:
+                            pass
 
+                    # DOM fallback: Process any card not already captured via network response
                     for card in cards:
                         if len(self.leads_collected) >= self.target_count or not self.is_running:
                             break
 
                         try:
-                            # 1. Get Title from link aria-label or card text
                             link_el = card.locator("a.hfpxzc").first
                             if await link_el.count() == 0:
                                 link_el = card.locator("a[href*='/maps/place/']").first
-
                             if await link_el.count() == 0:
                                 continue
 
                             href = await link_el.get_attribute("href") or ""
-                            title = await link_el.get_attribute("aria-label") or ""
-
+                            title = (await link_el.get_attribute("aria-label") or "").strip()
                             place_id_match = re.search(r"/maps/place/([^/]+)/", href)
                             place_id = place_id_match.group(1) if place_id_match else href[:80]
+                            norm_title = re.sub(r"[^a-zA-Z0-9]", "", title).lower()
 
-                            if place_id in self.seen_place_ids:
+                            if place_id in self.seen_place_ids or norm_title in self.seen_titles:
                                 continue
-                            self.seen_place_ids.add(place_id)
-                            new_items_processed += 1
-                            self.total_scanned += 1
 
                             card_text = await card.inner_text()
                             lines = [l.strip() for l in card_text.split("\n") if l.strip()]
                             if not title and lines:
                                 title = lines[0]
 
-                            # 2. Extract Website directly from Card links
+                            cached_phone = self.phone_cache.get(title) or self.phone_cache.get(norm_title) or self.phone_cache.get(place_id)
+                            if not cached_phone:
+                                for cand in lines:
+                                    c, _, _ = clean_phone_number(cand, self.country_code)
+                                    if c:
+                                        cached_phone = cand
+                                        break
+
                             card_web_url = None
                             for a in await card.locator("a").all():
                                 h = await a.get_attribute("href") or ""
@@ -322,58 +547,6 @@ class GoogleMapsScraper:
                                     card_web_url = h
                                     break
 
-                            has_website = bool(card_web_url)
-
-                            # Filter Zero-Website strictly if requested
-                            if self.no_website_only and has_website:
-                                logger.info(f"Skipping {title} (Has Website: {card_web_url})")
-                                if self.progress_callback:
-                                    self.progress_callback(
-                                        self.total_scanned,
-                                        self.no_website_count,
-                                        self.mobile_count,
-                                        f"Skipped {title} (Has Website)",
-                                    )
-                                continue
-
-                            if not has_website:
-                                self.no_website_count += 1
-
-                            # 3. Extract Phone & Mobile Detection
-                            phone_clean, is_mob = None, False
-                            phone_raw = None
-                            for cand in lines:
-                                c, m, _ = clean_phone_number(cand, self.country_code)
-                                if c:
-                                    phone_clean, is_mob = c, m
-                                    phone_raw = cand
-                                    break
-                            if not phone_clean:
-                                for tel_el in await card.locator("a[href^='tel:'], [data-item-id^='phone:tel:']").all():
-                                    h = await tel_el.get_attribute("href") or ""
-                                    did = await tel_el.get_attribute("data-item-id") or ""
-                                    val = h.replace("tel:", "").strip() or did.replace("phone:tel:", "").strip()
-                                    c, m, _ = clean_phone_number(val, self.country_code)
-                                    if c:
-                                        phone_clean, is_mob = c, m
-                                        phone_raw = val
-                                        break
-
-                            # Filter mobile if toggled
-                            if self.mobile_only and not is_mob:
-                                if self.progress_callback:
-                                    self.progress_callback(
-                                        self.total_scanned,
-                                        self.no_website_count,
-                                        self.mobile_count,
-                                        f"Skipped {title} (Non-mobile: {phone_clean or 'None'})",
-                                    )
-                                continue
-
-                            if phone_clean:
-                                self.mobile_count += 1
-
-                            # 4. Extract Rating & Reviews
                             rating = None
                             reviews_count = None
                             for line in lines:
@@ -393,7 +566,6 @@ class GoogleMapsScraper:
                                     except Exception:
                                         pass
 
-                            # 5. Extract Address
                             raw_addr = None
                             for line in lines:
                                 if "·" in line and not any(kw in line.lower() for kw in ["open", "closed", "opens", "closes", "hour"]):
@@ -403,110 +575,55 @@ class GoogleMapsScraper:
                                         raw_addr = parts[-1]
                                         break
 
-                            if not raw_addr:
-                                for line in lines:
-                                    cleaned_line = re.sub(r'[\ue000-\uf8ff]', '', line).strip()
-                                    if any(term in cleaned_line for term in ["St", "Rd", "Ave", "Blvd", "Way", "Drive", "Street", "Road", "Terrace", "Pl", "Place", "Lane", "Hwy", "Highway", "Floor", "Level"]):
-                                        parts = [p.strip() for p in cleaned_line.split("·") if p.strip()]
-                                        raw_addr = parts[-1] if parts else cleaned_line
-                                        break
-
-                            # Clean and format address with city
-                            clean_street = re.sub(r'[\ue000-\uf8ff]', '', raw_addr or '').strip() if raw_addr else ""
-                            clean_street = re.sub(r'^Address:\s*', '', clean_street, flags=re.IGNORECASE).strip()
-                            clean_street = " ".join(l.strip() for l in clean_street.splitlines() if l.strip())
-
-                            if clean_street and clean_street.lower() != self.location.lower():
-                                primary_city = self.location.split(",")[0].strip()
-                                if primary_city.lower() not in clean_street.lower():
-                                    address = f"{clean_street}, {self.location}"
-                                else:
-                                    address = clean_street
-                            else:
-                                address = self.location
-
-                            # Filter by rating if set
-                            if self.min_rating > 0 and (rating or 0.0) < self.min_rating:
-                                continue
-
-                            owner_name = self._extract_owner_name(title)
-
-                            # 6. Generate WhatsApp Link
-                            whatsapp_link = None
-                            if phone_clean:
-                                context_dict = {
-                                    "business_name": title,
-                                    "area": self.location,
-                                    "category": self.query,
-                                    "owner_name": owner_name or "there",
-                                }
-                                whatsapp_link = generate_whatsapp_link(phone_clean, self.template, context_dict)
-
-                            lead = LeadItem(
-                                place_id=place_id,
-                                title=title,
-                                category=self.query,
-                                address=address or self.location,
-                                city=self.location,
-                                phone_raw=phone_raw or phone_clean,
-                                phone_clean=phone_clean or phone_raw,
-                                is_mobile=is_mob,
-                                has_website=has_website,
-                                website_url=card_web_url,
-                                rating=rating,
-                                reviews_count=reviews_count,
-                                owner_name=owner_name,
-                                whatsapp_link=whatsapp_link,
-                                job_id=self.job_id,
-                                created_at=datetime.now().isoformat(),
-                            )
-
-                            self.leads_collected.append(lead)
-                            logger.info(f"Captured ({len(self.leads_collected)}/{self.target_count}): {lead.title} | Rating: {lead.rating} ({lead.reviews_count}) | Phone: {lead.phone_clean}")
-
-                            if self.lead_callback:
-                                self.lead_callback(lead)
-
-                            if self.progress_callback:
-                                self.progress_callback(
-                                    self.total_scanned,
-                                    self.no_website_count,
-                                    self.mobile_count,
-                                    f"Captured ({len(self.leads_collected)}/{self.target_count}): {lead.title}",
-                                )
-
+                            self._process_lead_dict({
+                                "title": title,
+                                "phone": cached_phone,
+                                "website": card_web_url,
+                                "address": raw_addr or self.location,
+                                "rating": rating,
+                                "reviews_count": reviews_count,
+                                "place_id": place_id,
+                            })
                         except Exception as card_err:
                             logger.debug(f"Card processing error: {card_err}")
                             continue
 
                     # Check if reached target
-                    if len(self.leads_collected) >= self.target_count:
+                    if len(self.leads_collected) >= self.target_count or not self.is_running or page.is_closed():
                         break
 
                     # Check if Google Maps reached end of results
-                    end_text = await page.locator("text='You\\'ve reached the end of the list'").count()
-                    if end_text > 0:
-                        logger.info("Reached the end of Google Maps results.")
+                    try:
+                        end_text = await page.locator("text='You\\'ve reached the end of the list'").count()
+                        if end_text > 0:
+                            logger.info("Reached the end of Google Maps results.")
+                            break
+                    except Exception:
                         break
 
-                    # Scroll the feed down with scrollTop = scrollHeight and PageDown!
-                    if await feed_locator.count() > 0:
-                        if self.progress_callback:
-                            self.progress_callback(
-                                self.total_scanned,
-                                self.no_website_count,
-                                self.mobile_count,
-                                f"Scrolling for more leads ({len(self.leads_collected)}/{self.target_count} collected)...",
-                            )
-                        await feed_locator.evaluate("el => el.scrollTop = el.scrollHeight")
-                        await page.keyboard.press("PageDown")
-                        await asyncio.sleep(2.0)
-                    else:
-                        await page.mouse.wheel(0, 2500)
-                        await page.keyboard.press("PageDown")
-                        await asyncio.sleep(2.0)
+                    prev_count = len(self.leads_collected)
 
-                    if new_items_processed == 0:
+                    # Scroll the feed down with scrollTop = scrollHeight and PageDown!
+                    try:
+                        if await feed_locator.count() > 0:
+                            if self.progress_callback:
+                                self.progress_callback(
+                                    self.total_scanned,
+                                    self.no_website_count,
+                                    self.mobile_count,
+                                    f"Scrolling for more leads ({len(self.leads_collected)}/{self.target_count} collected)...",
+                                )
+                            await feed_locator.evaluate("el => el.scrollTop = el.scrollHeight")
+                            await page.keyboard.press("PageDown")
+                            await asyncio.sleep(2.0)
+                        else:
+                            await page.mouse.wheel(0, 3000)
+                            await page.keyboard.press("PageDown")
+                            await asyncio.sleep(2.0)
+                    except Exception:
+                        break
+
+                    if len(self.leads_collected) == prev_count:
                         idle_scroll_attempts += 1
                         if idle_scroll_attempts >= max_idle_scrolls:
                             logger.info("No more new listings found after multiple scrolls.")
@@ -515,10 +632,14 @@ class GoogleMapsScraper:
                         idle_scroll_attempts = 0
 
             except Exception as e:
-                logger.error(f"Scraper error: {e}")
-                if self.progress_callback:
-                    self.progress_callback(self.total_scanned, self.no_website_count, self.mobile_count, f"Error: {e}")
-                raise e
+                # If we already collected leads and page was closed as part of completion, treat as success
+                if len(self.leads_collected) > 0 and ("closed" in str(e).lower() or not self.is_running):
+                    logger.info(f"Scraper finished with {len(self.leads_collected)} leads.")
+                else:
+                    logger.error(f"Scraper error: {e}")
+                    if self.progress_callback:
+                        self.progress_callback(self.total_scanned, self.no_website_count, self.mobile_count, f"Error: {e}")
+                    raise e
             finally:
                 try:
                     await context.close()
